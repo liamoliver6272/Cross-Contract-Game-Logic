@@ -7,10 +7,13 @@
 (define-constant ERR_GAME_FULL (err u105))
 (define-constant ERR_ALREADY_JOINED (err u106))
 (define-constant ERR_INSUFFICIENT_FUNDS (err u107))
+(define-constant ERR_GAME_EXPIRED (err u108))
 
 (define-constant GAME_STATE_WAITING u0)
 (define-constant GAME_STATE_ACTIVE u1)
 (define-constant GAME_STATE_FINISHED u2)
+
+(define-constant GAME_EXPIRY_BLOCKS u144)
 
 (define-constant CELL_EMPTY u0)
 (define-constant CELL_X u1)
@@ -267,6 +270,56 @@
 
 (define-read-only (get-game-count)
   (var-get game-counter)
+)
+
+(define-public (expire-game (game-id uint))
+  (let
+    (
+      (game (unwrap! (map-get? games game-id) ERR_GAME_NOT_FOUND))
+      (current-block stacks-block-height)
+      (game-age (- current-block (get created-at game)))
+    )
+    (asserts! (> game-age GAME_EXPIRY_BLOCKS) ERR_GAME_NOT_FOUND)
+    (asserts! (not (is-eq (get state game) GAME_STATE_FINISHED)) ERR_GAME_FINISHED)
+    (if (is-eq (get state game) GAME_STATE_WAITING)
+      (begin
+        (try! (as-contract (stx-transfer? (get bet-amount game) tx-sender (get player1 game))))
+        (var-set contract-balance (- (var-get contract-balance) (get bet-amount game)))
+        (map-set games game-id (merge game { state: GAME_STATE_FINISHED }))
+        (ok "waiting-game-expired")
+      )
+      (begin
+        (try! (as-contract (stx-transfer? (get bet-amount game) tx-sender (get player1 game))))
+        (try! (as-contract (stx-transfer? (get bet-amount game) tx-sender (unwrap-panic (get player2 game)))))
+        (var-set contract-balance (- (var-get contract-balance) (* (get bet-amount game) u2)))
+        (map-set games game-id (merge game { state: GAME_STATE_FINISHED }))
+        (ok "active-game-expired")
+      )
+    )
+  )
+)
+
+(define-read-only (is-game-expired (game-id uint))
+  (match (map-get? games game-id)
+    game (let
+      (
+        (current-block stacks-block-height)
+        (game-age (- current-block (get created-at game)))
+      )
+      (and 
+        (> game-age GAME_EXPIRY_BLOCKS)
+        (not (is-eq (get state game) GAME_STATE_FINISHED))
+      )
+    )
+    false
+  )
+)
+
+(define-read-only (get-game-expiry-block (game-id uint))
+  (match (map-get? games game-id)
+    game (some (+ (get created-at game) GAME_EXPIRY_BLOCKS))
+    none
+  )
 )
 
 ;; Helper function to replace an element at a specific index in a list (non-recursive)
