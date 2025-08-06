@@ -52,6 +52,17 @@
   }
 )
 
+(define-map player-reputation
+  principal
+  {
+    games-completed: uint,
+    games-abandoned: uint,
+    total-response-time: uint,
+    reputation-score: uint,
+    last-activity: uint
+  }
+)
+
 (define-public (create-game (bet-amount uint))
   (let
     (
@@ -62,6 +73,7 @@
     (try! (stx-transfer? bet-amount tx-sender (as-contract tx-sender)))
     (var-set game-counter game-id)
     (var-set contract-balance (+ (var-get contract-balance) bet-amount))
+    (update-player-reputation player u0)
     (map-set games game-id
       {
         player1: player,
@@ -96,6 +108,7 @@
     (asserts! (>= (stx-get-balance tx-sender) bet-amount) ERR_INSUFFICIENT_FUNDS)
     (try! (stx-transfer? bet-amount tx-sender (as-contract tx-sender)))
     (var-set contract-balance (+ (var-get contract-balance) bet-amount))
+    (update-player-reputation player u0)
     (map-set games game-id
       (merge game {
         player2: (some player),
@@ -226,11 +239,15 @@
         (var-set contract-balance (- (var-get contract-balance) total-pot))
         (update-player-stats (unwrap-panic winner-principal) true)
         (update-player-stats (unwrap-panic (get player2 game)) false)
+        (update-player-reputation (get player1 game) u1)
+        (update-player-reputation (unwrap-panic (get player2 game)) u1)
       )
       (begin
         (try! (as-contract (stx-transfer? (get bet-amount game) tx-sender (get player1 game))))
         (try! (as-contract (stx-transfer? (get bet-amount game) tx-sender (unwrap-panic (get player2 game)))))
         (var-set contract-balance (- (var-get contract-balance) total-pot))
+        (update-player-reputation (get player1 game) u1)
+        (update-player-reputation (unwrap-panic (get player2 game)) u1)
       )
     )
     (ok true)
@@ -264,6 +281,10 @@
   (map-get? player-stats player)
 )
 
+(define-read-only (get-player-reputation (player principal))
+  (map-get? player-reputation player)
+)
+
 (define-read-only (get-contract-balance)
   (var-get contract-balance)
 )
@@ -285,6 +306,7 @@
       (begin
         (try! (as-contract (stx-transfer? (get bet-amount game) tx-sender (get player1 game))))
         (var-set contract-balance (- (var-get contract-balance) (get bet-amount game)))
+        (update-player-reputation (get player1 game) u2)
         (map-set games game-id (merge game { state: GAME_STATE_FINISHED }))
         (ok "waiting-game-expired")
       )
@@ -292,6 +314,8 @@
         (try! (as-contract (stx-transfer? (get bet-amount game) tx-sender (get player1 game))))
         (try! (as-contract (stx-transfer? (get bet-amount game) tx-sender (unwrap-panic (get player2 game)))))
         (var-set contract-balance (- (var-get contract-balance) (* (get bet-amount game) u2)))
+        (update-player-reputation (get player1 game) u2)
+        (update-player-reputation (unwrap-panic (get player2 game)) u2)
         (map-set games game-id (merge game { state: GAME_STATE_FINISHED }))
         (ok "active-game-expired")
       )
@@ -319,6 +343,97 @@
   (match (map-get? games game-id)
     game (some (+ (get created-at game) GAME_EXPIRY_BLOCKS))
     none
+  )
+)
+
+(define-private (update-player-reputation (player principal) (action uint))
+  (let
+    (
+      (current-rep (default-to 
+        {games-completed: u0, games-abandoned: u0, total-response-time: u0, reputation-score: u1000, last-activity: u0} 
+        (map-get? player-reputation player)
+      ))
+      (current-block stacks-block-height)
+      (response-time (- current-block (get last-activity current-rep)))
+    )
+    (if (is-eq action u0)
+      (map-set player-reputation player
+        (merge current-rep {
+          last-activity: current-block,
+          total-response-time: (+ (get total-response-time current-rep) response-time)
+        })
+      )
+      (if (is-eq action u1)
+        (let
+          (
+            (new-completed (+ (get games-completed current-rep) u1))
+            (completion-rate (/ (* new-completed u1000) (+ new-completed (get games-abandoned current-rep))))
+            (avg-response (if (> new-completed u0) (/ (get total-response-time current-rep) new-completed) u0))
+            (new-score (calculate-reputation-score completion-rate avg-response))
+          )
+          (map-set player-reputation player
+            (merge current-rep {
+              games-completed: new-completed,
+              reputation-score: new-score,
+              last-activity: current-block
+            })
+          )
+        )
+        (let
+          (
+            (new-abandoned (+ (get games-abandoned current-rep) u1))
+            (completion-rate (/ (* (get games-completed current-rep) u1000) (+ (get games-completed current-rep) new-abandoned)))
+            (avg-response (if (> (get games-completed current-rep) u0) (/ (get total-response-time current-rep) (get games-completed current-rep)) u0))
+            (new-score (calculate-reputation-score completion-rate avg-response))
+          )
+          (map-set player-reputation player
+            (merge current-rep {
+              games-abandoned: new-abandoned,
+              reputation-score: new-score,
+              last-activity: current-block
+            })
+          )
+        )
+      )
+    )
+  )
+)
+
+(define-private (calculate-reputation-score (completion-rate uint) (avg-response-time uint))
+  (let
+    (
+      (completion-bonus (if (> completion-rate u800) u200 (/ completion-rate u4)))
+      (response-penalty (if (> avg-response-time u100) u200 (/ avg-response-time u2)))
+      (base-score u1000)
+    )
+    (if (> (+ completion-bonus base-score) response-penalty)
+      (- (+ completion-bonus base-score) response-penalty)
+      u100
+    )
+  )
+)
+
+(define-read-only (get-reputation-tier (player principal))
+  (match (map-get? player-reputation player)
+    rep (let
+      (
+        (score (get reputation-score rep))
+      )
+      (if (>= score u1400)
+        "legendary"
+        (if (>= score u1200)
+          "expert"
+          (if (>= score u1000)
+            "reliable" 
+            (if (>= score u800)
+              "average"
+              "novice"
+            )
+          )
+        )
+      )
+    )
+    "unrated"
   )
 )
 
