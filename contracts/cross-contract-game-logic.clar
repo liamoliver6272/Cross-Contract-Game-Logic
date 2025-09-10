@@ -22,6 +22,8 @@
 (define-data-var game-counter uint u0)
 (define-data-var contract-balance uint u0)
 
+(define-data-var leaderboard-size uint u10)
+
 (define-map games
   uint
   {
@@ -60,6 +62,38 @@
     total-response-time: uint,
     reputation-score: uint,
     last-activity: uint
+  }
+)
+
+(define-map leaderboard-wins
+  uint
+  {
+    player: principal,
+    wins: uint
+  }
+)
+
+(define-map leaderboard-winnings
+  uint
+  {
+    player: principal,
+    winnings: uint
+  }
+)
+
+(define-map leaderboard-reputation
+  uint
+  {
+    player: principal,
+    reputation: uint
+  }
+)
+
+(define-map leaderboard-activity
+  uint
+  {
+    player: principal,
+    games: uint
   }
 )
 
@@ -241,6 +275,7 @@
         (update-player-stats (unwrap-panic (get player2 game)) false)
         (update-player-reputation (get player1 game) u1)
         (update-player-reputation (unwrap-panic (get player2 game)) u1)
+        (update-leaderboards (unwrap-panic winner-principal) total-pot)
       )
       (begin
         (try! (as-contract (stx-transfer? (get bet-amount game) tx-sender (get player1 game))))
@@ -434,6 +469,102 @@
       )
     )
     "unrated"
+  )
+)
+
+(define-private (update-leaderboards (winner principal) (winnings uint))
+  (let
+    (
+      (player-stats-data (default-to {games-played: u0, games-won: u0, total-winnings: u0} (map-get? player-stats winner)))
+      (player-rep-data (default-to {games-completed: u0, games-abandoned: u0, total-response-time: u0, reputation-score: u1000, last-activity: u0} (map-get? player-reputation winner)))
+    )
+    (simple-update-leaderboard winner (get games-won player-stats-data) (get total-winnings player-stats-data) (get reputation-score player-rep-data) (get games-played player-stats-data))
+  )
+)
+
+(define-private (simple-update-leaderboard (player principal) (wins uint) (winnings uint) (reputation uint) (activity uint))
+  (begin
+    (map-set leaderboard-wins u1 {player: player, wins: wins})
+    (map-set leaderboard-winnings u1 {player: player, winnings: winnings})
+    (map-set leaderboard-reputation u1 {player: player, reputation: reputation})
+    (map-set leaderboard-activity u1 {player: player, games: activity})
+  )
+)
+
+(define-read-only (get-wins-leaderboard)
+  (list
+    (map-get? leaderboard-wins u1)
+    (map-get? leaderboard-wins u2)
+    (map-get? leaderboard-wins u3)
+    (map-get? leaderboard-wins u4)
+    (map-get? leaderboard-wins u5)
+    (map-get? leaderboard-wins u6)
+    (map-get? leaderboard-wins u7)
+    (map-get? leaderboard-wins u8)
+    (map-get? leaderboard-wins u9)
+    (map-get? leaderboard-wins u10)
+  )
+)
+
+(define-read-only (get-winnings-leaderboard)
+  (list
+    (map-get? leaderboard-winnings u1)
+    (map-get? leaderboard-winnings u2)
+    (map-get? leaderboard-winnings u3)
+    (map-get? leaderboard-winnings u4)
+    (map-get? leaderboard-winnings u5)
+    (map-get? leaderboard-winnings u6)
+    (map-get? leaderboard-winnings u7)
+    (map-get? leaderboard-winnings u8)
+    (map-get? leaderboard-winnings u9)
+    (map-get? leaderboard-winnings u10)
+  )
+)
+
+(define-read-only (get-reputation-leaderboard)
+  (list
+    (map-get? leaderboard-reputation u1)
+    (map-get? leaderboard-reputation u2)
+    (map-get? leaderboard-reputation u3)
+    (map-get? leaderboard-reputation u4)
+    (map-get? leaderboard-reputation u5)
+    (map-get? leaderboard-reputation u6)
+    (map-get? leaderboard-reputation u7)
+    (map-get? leaderboard-reputation u8)
+    (map-get? leaderboard-reputation u9)
+    (map-get? leaderboard-reputation u10)
+  )
+)
+
+(define-read-only (get-activity-leaderboard)
+  (list
+    (map-get? leaderboard-activity u1)
+    (map-get? leaderboard-activity u2)
+    (map-get? leaderboard-activity u3)
+    (map-get? leaderboard-activity u4)
+    (map-get? leaderboard-activity u5)
+    (map-get? leaderboard-activity u6)
+    (map-get? leaderboard-activity u7)
+    (map-get? leaderboard-activity u8)
+    (map-get? leaderboard-activity u9)
+    (map-get? leaderboard-activity u10)
+  )
+)
+
+(define-read-only (get-player-leaderboard-rank (player principal))
+  (let
+    (
+      (wins-entry (map-get? leaderboard-wins u1))
+      (winnings-entry (map-get? leaderboard-winnings u1))
+      (reputation-entry (map-get? leaderboard-reputation u1))
+      (activity-entry (map-get? leaderboard-activity u1))
+    )
+    {
+      wins: (if (and (is-some wins-entry) (is-eq (get player (unwrap-panic wins-entry)) player)) (some u1) none),
+      winnings: (if (and (is-some winnings-entry) (is-eq (get player (unwrap-panic winnings-entry)) player)) (some u1) none),
+      reputation: (if (and (is-some reputation-entry) (is-eq (get player (unwrap-panic reputation-entry)) player)) (some u1) none),
+      activity: (if (and (is-some activity-entry) (is-eq (get player (unwrap-panic activity-entry)) player)) (some u1) none)
+    }
   )
 )
 
