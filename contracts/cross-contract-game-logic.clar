@@ -8,6 +8,8 @@
 (define-constant ERR_ALREADY_JOINED (err u106))
 (define-constant ERR_INSUFFICIENT_FUNDS (err u107))
 (define-constant ERR_GAME_EXPIRED (err u108))
+(define-constant ERR_SELF_REFERRAL (err u109))
+(define-constant ERR_ALREADY_HAS_REFERRER (err u110))
 
 (define-constant GAME_STATE_WAITING u0)
 (define-constant GAME_STATE_ACTIVE u1)
@@ -23,6 +25,9 @@
 (define-data-var contract-balance uint u0)
 
 (define-data-var leaderboard-size uint u10)
+
+(define-data-var referral-bonus-percentage uint u5)
+(define-data-var total-referral-rewards uint u0)
 
 (define-map games
   uint
@@ -94,6 +99,16 @@
   {
     player: principal,
     games: uint
+  }
+)
+
+(define-map referrals
+  principal
+  {
+    referrer: (optional principal),
+    referral-count: uint,
+    total-rewards: uint,
+    joined-at: uint
   }
 )
 
@@ -267,25 +282,28 @@
         winner: winner-principal
       })
     )
-    (if (is-some winner-principal)
-      (begin
-        (try! (as-contract (stx-transfer? total-pot tx-sender (unwrap-panic winner-principal))))
-        (var-set contract-balance (- (var-get contract-balance) total-pot))
-        (update-player-stats (unwrap-panic winner-principal) true)
-        (update-player-stats (unwrap-panic (get player2 game)) false)
-        (update-player-reputation (get player1 game) u1)
-        (update-player-reputation (unwrap-panic (get player2 game)) u1)
-        (update-leaderboards (unwrap-panic winner-principal) total-pot)
+    (begin
+      (if (is-some winner-principal)
+        (begin
+          (try! (as-contract (stx-transfer? total-pot tx-sender (unwrap-panic winner-principal))))
+          (var-set contract-balance (- (var-get contract-balance) total-pot))
+          (update-player-stats (unwrap-panic winner-principal) true)
+          (update-player-stats (unwrap-panic (get player2 game)) false)
+          (update-player-reputation (get player1 game) u1)
+          (update-player-reputation (unwrap-panic (get player2 game)) u1)
+          (update-leaderboards (unwrap-panic winner-principal) total-pot)
+          (try! (process-referral-reward (unwrap-panic winner-principal) total-pot))
+        )
+        (begin
+          (try! (as-contract (stx-transfer? (get bet-amount game) tx-sender (get player1 game))))
+          (try! (as-contract (stx-transfer? (get bet-amount game) tx-sender (unwrap-panic (get player2 game)))))
+          (var-set contract-balance (- (var-get contract-balance) total-pot))
+          (update-player-reputation (get player1 game) u1)
+          (update-player-reputation (unwrap-panic (get player2 game)) u1)
+        )
       )
-      (begin
-        (try! (as-contract (stx-transfer? (get bet-amount game) tx-sender (get player1 game))))
-        (try! (as-contract (stx-transfer? (get bet-amount game) tx-sender (unwrap-panic (get player2 game)))))
-        (var-set contract-balance (- (var-get contract-balance) total-pot))
-        (update-player-reputation (get player1 game) u1)
-        (update-player-reputation (unwrap-panic (get player2 game)) u1)
-      )
+      (ok true)
     )
-    (ok true)
   )
 )
 
@@ -566,6 +584,101 @@
       activity: (if (and (is-some activity-entry) (is-eq (get player (unwrap-panic activity-entry)) player)) (some u1) none)
     }
   )
+)
+
+(define-public (set-referrer (referrer-address principal))
+  (let
+    (
+      (player tx-sender)
+      (current-referral (map-get? referrals player))
+    )
+    (asserts! (not (is-eq player referrer-address)) ERR_SELF_REFERRAL)
+    (asserts! (is-none current-referral) ERR_ALREADY_HAS_REFERRER)
+    (map-set referrals player
+      {
+        referrer: (some referrer-address),
+        referral-count: u0,
+        total-rewards: u0,
+        joined-at: stacks-block-height
+      }
+    )
+    (match (map-get? referrals referrer-address)
+      existing-data
+        (map-set referrals referrer-address
+          (merge existing-data {
+            referral-count: (+ (get referral-count existing-data) u1)
+          })
+        )
+      (map-set referrals referrer-address
+        {
+          referrer: none,
+          referral-count: u1,
+          total-rewards: u0,
+          joined-at: stacks-block-height
+        }
+      )
+    )
+    (ok true)
+  )
+)
+
+(define-private (process-referral-reward (winner principal) (winnings uint))
+  (match (map-get? referrals winner)
+    referral-data
+      (match (get referrer referral-data)
+        referrer-principal
+          (let
+            (
+              (bonus-percentage (var-get referral-bonus-percentage))
+              (reward-amount (/ (* winnings bonus-percentage) u100))
+            )
+            (if (> reward-amount u0)
+              (begin
+                (try! (as-contract (stx-transfer? reward-amount tx-sender referrer-principal)))
+                (var-set total-referral-rewards (+ (var-get total-referral-rewards) reward-amount))
+                (match (map-get? referrals referrer-principal)
+                  referrer-data
+                    (map-set referrals referrer-principal
+                      (merge referrer-data {
+                        total-rewards: (+ (get total-rewards referrer-data) reward-amount)
+                      })
+                    )
+                  true
+                )
+                (ok true)
+              )
+              (ok true)
+            )
+          )
+        (ok true)
+      )
+    (ok true)
+  )
+)
+
+(define-read-only (get-referral-info (player principal))
+  (map-get? referrals player)
+)
+
+(define-read-only (get-referral-stats (player principal))
+  (match (map-get? referrals player)
+    data
+      (some {
+        has-referrer: (is-some (get referrer data)),
+        referral-count: (get referral-count data),
+        total-rewards: (get total-rewards data),
+        joined-at: (get joined-at data)
+      })
+    none
+  )
+)
+
+(define-read-only (get-referral-bonus-percentage)
+  (var-get referral-bonus-percentage)
+)
+
+(define-read-only (get-total-referral-rewards)
+  (var-get total-referral-rewards)
 )
 
 ;; Helper function to replace an element at a specific index in a list (non-recursive)
